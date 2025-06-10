@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepSeek Performance Analysis</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Chosen Palette: Calm Neutral Harmony -->
+    <!-- Application Structure Plan: The application is designed as a single-page, narrative-driven journey to explain DeepSeek's performance bottlenecks. It starts with the fundamental concepts (Prefill vs. Decode), drills into the single-GPU memory bottleneck, and then reveals how this is superseded by the communication bottleneck in distributed systems. This progressive reveal structure was chosen to build understanding logically, from general principles to specific, complex scenarios, making the information more digestible for the user. Key interactions like toggles and sliders are used to engage the user and let them explore the "what-if" scenarios, reinforcing the concepts visually. -->
+    <!-- Visualization & Content Choices: 
+        - Prefill/Decode Comparison: Goal=Compare, Method=Interactive Cards (HTML/JS), Justification=Direct, side-by-side comparison of two core concepts.
+        - KV Cache Growth: Goal=Show Change, Method=Bar Chart + Slider (Chart.js), Justification=Visually demonstrates the direct relationship between sequence length and memory pressure.
+        - MoE Architecture: Goal=Inform, Method=Clickable Info Boxes (HTML/JS), Justification=Provides layered information without cluttering the main view.
+        - Distributed Pipeline: Goal=Organize, Method=HTML/CSS Diagram, Justification=Clearly visualizes the multi-stage process flow.
+        - Latency Breakdown: Goal=Compare Proportions, Method=Donut Chart + Slider (Chart.js), Justification=Effectively shows how the primary bottleneck (All-to-All) changes in response to an external factor (network bandwidth).
+        - Summary: Goal=Inform, Method=HTML Table, Justification=Concise presentation of final conclusions.
+    -->
+    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #F8F7F4;
+            color: #3a3a3a;
+        }
+        .section-card {
+            background-color: #FFFFFF;
+            border: 1px solid #E5E7EB;
+            border-radius: 0.75rem;
+            padding: 2rem;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+            transition: all 0.3s ease-in-out;
+        }
+        .interactive-tab {
+            cursor: pointer;
+            transition: all 0.2s ease-in-out;
+        }
+        .interactive-tab.active {
+            background-color: #14B8A6;
+            color: #FFFFFF;
+        }
+        .interactive-tab:not(.active) {
+            background-color: #F3F4F6;
+            color: #4B5563;
+        }
+        .info-box {
+            cursor: pointer;
+            border-left: 4px solid #FBBF24;
+        }
+        .info-box-content {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.5s ease-in-out;
+        }
+        .process-step {
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+        .process-step.active {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -2px rgb(0 0 0 / 0.05);
+            border-color: #14B8A6;
+        }
+        .chart-container {
+            position: relative;
+            width: 100%;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+            height: 350px;
+            max-height: 400px;
+        }
+        @media (max-width: 768px) {
+            .chart-container {
+                height: 300px;
+            }
+        }
+    </style>
+</head>
+<body class="antialiased">
+
+    <div class="container mx-auto px-4 py-8 md:py-12">
+        <header class="text-center mb-12 md:mb-16">
+            <h1 class="text-4xl md:text-5xl font-bold text-gray-800 mb-4">Unpacking the DeepSeek Performance Puzzle</h1>
+            <p class="text-lg md:text-xl text-gray-600 max-w-3xl mx-auto">An interactive analysis of inference bottlenecks, from single-GPU memory limits to multi-GPU communication walls.</p>
+        </header>
+
+        <main class="space-y-12 md:space-y-16">
+            
+            <section id="prefill-vs-decode" class="section-card">
+                <h2 class="text-2xl md:text-3xl font-bold text-center mb-2 text-gray-800">The Two Faces of Inference</h2>
+                <p class="text-gray-600 text-center mb-8">LLM inference isn't a single process. It's a tale of two distinct phases: Prefill and Decoding. Understanding their differences is the first step to pinpointing performance bottlenecks. Click to explore each phase.</p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+                    <div id="prefill-card" class="p-6 rounded-lg interactive-tab active">
+                        <h3 class="text-xl font-semibold mb-3 text-center">🚀 Prefill Phase</h3>
+                        <div id="prefill-content" class="space-y-2">
+                            <p><strong class="font-semibold">Task:</strong> Process the entire input prompt at once to generate the first token.</p>
+                            <p><strong class="font-semibold">Operations:</strong> Dominated by large, parallelizable matrix-matrix multiplications.</p>
+                            <p><strong class="font-semibold">Bottleneck:</strong> Typically <span class="font-bold text-teal-600">Compute-Bound</span>, especially with long prompts. The GPU's raw processing power (FLOPS) is the limiting factor.</p>
+                            <p><strong class="font-semibold">Arithmetic Intensity:</strong> High. Many calculations are performed for each byte of data loaded.</p>
+                        </div>
+                    </div>
+                    <div id="decode-card" class="p-6 rounded-lg interactive-tab">
+                        <h3 class="text-xl font-semibold mb-3 text-center">✍️ Decoding Phase</h3>
+                        <div id="decode-content" class="space-y-2">
+                             <p><strong class="font-semibold">Task:</strong> Generate subsequent tokens one-by-one, autoregressively.</p>
+                             <p><strong class="font-semibold">Operations:</strong> Characterized by sequential matrix-vector multiplications.</p>
+                             <p><strong class="font-semibold">Bottleneck:</strong> Overwhelmingly <span class="font-bold text-amber-600">Memory-Bound</span>. The speed of accessing the KV Cache from GPU memory is the bottleneck.</p>
+                             <p><strong class="font-semibold">Arithmetic Intensity:</strong> Low. The GPU often waits for data, underutilizing its compute units.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="memory-bound" class="section-card">
+                <h2 class="text-2xl md:text-3xl font-bold text-center mb-2 text-gray-800">The Single-GPU Bottleneck: The Memory Wall</h2>
+                <p class="text-gray-600 text-center mb-8">In a single-GPU setup, the decoding phase is a constant battle against the "memory wall," primarily due to the Key-Value (KV) Cache. This cache stores attention states to avoid recomputation, but it grows with every token, demanding massive memory bandwidth.</p>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
+                    <div>
+                        <h3 class="text-xl font-semibold text-gray-700 mb-4">The Ever-Growing KV Cache</h3>
+                        <p class="text-gray-600 mb-6">As the generated sequence gets longer, the KV Cache size balloons, requiring the GPU to read more data from its main memory (HBM) for every single new token. Use the slider to see how sequence length impacts the memory footprint for a typical large model.</p>
+                        
+                        <div>
+                            <label for="sequenceLengthSlider" class="block font-medium text-gray-700 mb-2">Sequence Length: <span id="sequenceLengthLabel" class="font-bold text-teal-600">8,192</span> tokens</label>
+                            <input id="sequenceLengthSlider" type="range" min="1024" max="128000" step="1024" value="8192" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                        </div>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="kvCacheChart"></canvas>
+                    </div>
+                </div>
+
+                <div class="mt-12">
+                     <h3 class="text-xl font-semibold text-gray-700 mb-4 text-center">DeepSeek's Architectural Answers</h3>
+                     <p class="text-gray-600 text-center mb-6">DeepSeek employs clever architectural designs to mitigate these issues. Click to learn more.</p>
+                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div class="info-box bg-amber-50 p-4 rounded-lg">
+                            <h4 class="font-semibold text-gray-800">🧠 Mixture of Experts (MoE)</h4>
+                            <div class="info-box-content">
+                                <p class="text-sm text-gray-600 mt-2">MoE reduces the *computational* load. Instead of using the whole model, it routes each token to a small subset of "expert" networks. This keeps the number of active parameters low, saving FLOPs, but the weights for *all* experts must still reside in memory.</p>
+                            </div>
+                        </div>
+                        <div class="info-box bg-amber-50 p-4 rounded-lg">
+                            <h4 class="font-semibold text-gray-800">💡 Multi-Head Latent Attention (MLA)</h4>
+                            <div class="info-box-content">
+                                <p class="text-sm text-gray-600 mt-2">MLA directly tackles the KV Cache *memory* problem. It compresses the attention data into a smaller "latent space," significantly reducing the size of the KV Cache. This means less data to store and read, directly easing the memory bandwidth bottleneck.</p>
+                            </div>
+                        </div>
+                     </div>
+                </div>
+            </section>
+
+            <section id="communication-wall" class="section-card">
+                 <h2 class="text-2xl md:text-3xl font-bold text-center mb-2 text-gray-800">The Distributed Bottleneck: The Communication Wall</h2>
+                <p class="text-gray-600 text-center mb-8">When scaling DeepSeek across multiple GPUs to fit its massive size, a new, more formidable bottleneck emerges. The need to route tokens to experts on different GPUs creates a communication traffic jam that can dominate latency.</p>
+                
+                <h3 class="text-xl font-semibold text-gray-700 mb-4 text-center">Anatomy of a Distributed MoE Decoding Step</h3>
+                <p class="text-gray-600 text-center mb-8">Click each step to understand its role. The red steps represent pure communication overhead.</p>
+                <div class="flex flex-col md:flex-row items-center justify-center space-y-4 md:space-y-0 md:space-x-4 mb-10">
+                    <div id="step-mla" class="process-step border-2 border-gray-300 rounded-lg p-4 w-full md:w-1/4 text-center bg-white"><strong>1. MLA</strong><br/><span class="text-sm">Compute Attention</span></div>
+                    <div class="text-2xl font-mono text-red-500 hidden md:block">&rarr;</div>
+                    <div id="step-dispatch" class="process-step border-2 border-red-400 rounded-lg p-4 w-full md:w-1/4 text-center bg-red-50"><strong>2. All-to-All Dispatch</strong><br/><span class="text-sm">Route Tokens to Experts</span></div>
+                    <div class="text-2xl font-mono text-gray-500 hidden md:block">&rarr;</div>
+                    <div id="step-moe" class="process-step border-2 border-gray-300 rounded-lg p-4 w-full md:w-1/4 text-center bg-white"><strong>3. MoE Expert</strong><br/><span class="text-sm">Compute in Parallel</span></div>
+                    <div class="text-2xl font-mono text-red-500 hidden md:block">&rarr;</div>
+                    <div id="step-combine" class="process-step border-2 border-red-400 rounded-lg p-4 w-full md:w-1/4 text-center bg-red-50"><strong>4. All-to-All Combine</strong><br/><span class="text-sm">Aggregate Results</span></div>
+                </div>
+                <p id="step-description" class="text-center text-gray-700 min-h-[4rem] px-4 py-2 bg-gray-100 rounded-md flex items-center justify-center">Select a step above to see its description.</p>
+
+                <div class="mt-12 grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
+                    <div>
+                        <h3 class="text-xl font-semibold text-gray-700 mb-4">MoE Layer Latency Breakdown</h3>
+                        <p class="text-gray-600 mb-6">The "All-to-All" communication for dispatching and combining tokens often consumes over half the total time for an MoE layer. Adjust the simulated network quality to see how the bottleneck shifts. With poor networking, communication dominates completely.</p>
+                        <div>
+                            <label for="networkSlider" class="block font-medium text-gray-700 mb-2">Inter-GPU Network Quality: <span id="networkLabel" class="font-bold text-teal-600">High (NVLink)</span></label>
+                            <input id="networkSlider" type="range" min="0" max="100" value="80" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                        </div>
+                    </div>
+                     <div class="chart-container">
+                        <canvas id="latencyBreakdownChart"></canvas>
+                    </div>
+                </div>
+
+            </section>
+            
+            <section id="conclusion" class="section-card">
+                 <h2 class="text-2xl md:text-3xl font-bold text-center mb-8 text-gray-800">Conclusion: It's All About Context</h2>
+                 <p class="text-gray-600 text-center mb-8">The primary performance bottleneck for DeepSeek decoding is not a single issue, but depends entirely on the deployment scenario.</p>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="bg-gray-100">
+                                <th class="p-4 font-semibold text-sm text-gray-700 uppercase">Scenario</th>
+                                <th class="p-4 font-semibold text-sm text-gray-700 uppercase">Primary Bottleneck</th>
+                                <th class="p-4 font-semibold text-sm text-gray-700 uppercase">Key Limiting Factor</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white">
+                            <tr>
+                                <td class="p-4 border-t border-gray-200 font-medium">Single GPU / Small Scale</td>
+                                <td class="p-4 border-t border-gray-200 font-bold text-amber-700">Memory-Bound</td>
+                                <td class="p-4 border-t border-gray-200">Memory Bandwidth (Accessing KV Cache)</td>
+                            </tr>
+                            <tr>
+                                <td class="p-4 border-t border-gray-200 font-medium">Multi-GPU / Distributed MoE</td>
+                                <td class="p-4 border-t border-gray-200 font-bold text-red-700">Communication-Bound</td>
+                                <td class="p-4 border-t border-gray-200">Inter-GPU Network Speed (All-to-All Collectives)</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                 <div class="mt-10">
+                    <h3 class="text-xl font-semibold text-gray-700 mb-4 text-center">Strategic Recommendations</h3>
+                    <ul class="list-disc list-inside space-y-2 text-gray-600 max-w-2xl mx-auto">
+                        <li><strong>For Memory Bottlenecks:</strong> Continue developing advanced KV Cache compression (like MLA), quantization, and intelligent memory management within inference engines.</li>
+                        <li><strong>For Communication Bottlenecks:</strong> Invest in high-bandwidth interconnects (e.g., NVLink), develop topology-aware routing algorithms, and improve communication-computation overlap to hide network latency.</li>
+                        <li><strong>Holistic Design:</strong> Future performance gains will come from co-designing models, software, and hardware to minimize data movement at every level.</li>
+                    </ul>
+                </div>
+            </section>
+        </main>
+    </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+
+    const prefillCard = document.getElementById('prefill-card');
+    const decodeCard = document.getElementById('decode-card');
+    prefillCard.addEventListener('click', () => {
+        prefillCard.classList.add('active');
+        decodeCard.classList.remove('active');
+    });
+    decodeCard.addEventListener('click', () => {
+        decodeCard.classList.add('active');
+        prefillCard.classList.remove('active');
+    });
+    
+    const sequenceLengthSlider = document.getElementById('sequenceLengthSlider');
+    const sequenceLengthLabel = document.getElementById('sequenceLengthLabel');
+    const kvCacheCtx = document.getElementById('kvCacheChart').getContext('2d');
+    
+    const layers = 40; 
+    const heads = 32;
+    const head_dim = 128;
+    const bytes_per_param = 2;
+
+    function calculateKvCacheSize(sequenceLength) {
+        return (2 * sequenceLength * layers * heads * head_dim * bytes_per_param) / (1024**3);
+    }
+
+    let kvCacheChart = new Chart(kvCacheCtx, {
+        type: 'bar',
+        data: {
+            labels: ['KV Cache Size'],
+            datasets: [{
+                label: 'Memory Footprint (GB)',
+                data: [calculateKvCacheSize(8192)],
+                backgroundColor: 'rgba(251, 191, 36, 0.6)',
+                borderColor: 'rgba(251, 191, 36, 1)',
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                title: { display: true, text: 'KV Cache Memory Footprint' }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    title: { display: true, text: 'Size (GB)' }
+                }
+            }
+        }
+    });
+
+    sequenceLengthSlider.addEventListener('input', (e) => {
+        const seqLen = parseInt(e.target.value);
+        sequenceLengthLabel.textContent = seqLen.toLocaleString();
+        kvCacheChart.data.datasets[0].data[0] = calculateKvCacheSize(seqLen);
+        kvCacheChart.update();
+    });
+
+    const infoBoxes = document.querySelectorAll('.info-box');
+    infoBoxes.forEach(box => {
+        box.addEventListener('click', () => {
+            const content = box.querySelector('.info-box-content');
+            if (content.style.maxHeight && content.style.maxHeight !== '0px') {
+                content.style.maxHeight = '0px';
+            } else {
+                content.style.maxHeight = content.scrollHeight + 'px';
+            }
+        });
+    });
+
+    const steps = {
+        'step-mla': 'Attention is computed for the current token against the (compressed) KV Cache. This is primarily a compute and memory-bound step.',
+        'step-dispatch': 'CRITICAL BOTTLENECK: A network-intensive All-to-All operation shuffles tokens across GPUs to reach their assigned "expert" networks.',
+        'step-moe': 'The expert networks (MLPs) perform their computations in parallel on the tokens they received.',
+        'step-combine': 'CRITICAL BOTTLENECK: Another All-to-All operation shuffles the results back from the experts to their original GPU to be combined.'
+    };
+    const stepDescription = document.getElementById('step-description');
+    const processStepElements = document.querySelectorAll('.process-step');
+    processStepElements.forEach(stepEl => {
+        stepEl.addEventListener('click', () => {
+            processStepElements.forEach(el => el.classList.remove('active'));
+            stepEl.classList.add('active');
+            stepDescription.textContent = steps[stepEl.id];
+        });
+    });
+
+    const networkSlider = document.getElementById('networkSlider');
+    const networkLabel = document.getElementById('networkLabel');
+    const latencyCtx = document.getElementById('latencyBreakdownChart').getContext('2d');
+
+    const baseLatency = {
+        all2all: 59.2,
+        expertCompute: 30.8,
+        other: 10
+    };
+
+    function calculateLatency(networkQuality) {
+        const maxAll2All = 80;
+        const minAll2All = 25;
+        let all2all_percent = maxAll2All - (networkQuality / 100) * (maxAll2All - minAll2All);
+        
+        const remainder = 100 - all2all_percent;
+        const expert_percent = remainder * (baseLatency.expertCompute / (baseLatency.expertCompute + baseLatency.other));
+        const other_percent = remainder * (baseLatency.other / (baseLatency.expertCompute + baseLatency.other));
+
+        return [all2all_percent, expert_percent, other_percent];
+    }
+    
+    let latencyBreakdownChart = new Chart(latencyCtx, {
+        type: 'doughnut',
+        data: {
+            labels: ['All-to-All Communication', 'Expert Computation', 'Other (MLA, etc.)'],
+            datasets: [{
+                data: calculateLatency(80),
+                backgroundColor: [
+                    'rgba(239, 68, 68, 0.7)',
+                    'rgba(5, 150, 105, 0.7)',
+                    'rgba(107, 114, 128, 0.7)',
+                ],
+                borderColor: [
+                    'rgba(239, 68, 68, 1)',
+                    'rgba(5, 150, 105, 1)',
+                    'rgba(107, 114, 128, 1)',
+                ],
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'top',
+                },
+                title: {
+                    display: true,
+                    text: 'MoE Layer Latency Breakdown'
+                }
+            }
+        }
+    });
+
+    networkSlider.addEventListener('input', (e) => {
+        const quality = parseInt(e.target.value);
+        if (quality < 33) {
+            networkLabel.textContent = 'Low (PCIe/Ethernet)';
+        } else if (quality < 66) {
+            networkLabel.textContent = 'Medium (Good Interconnect)';
+        } else {
+            networkLabel.textContent = 'High (NVLink)';
+        }
+        latencyBreakdownChart.data.datasets[0].data = calculateLatency(quality);
+        latencyBreakdownChart.update();
+    });
+
+});
+</script>
+
+</body>
+</html>
